@@ -47,42 +47,60 @@ def boxUnion(xyxy_a, xyxy_b):
     i = boxIntersection(xyxy_a,xyxy_b)
     return (xyxy_a[2]-xyxy_a[0]) * (xyxy_a[3]-xyxy_a[1]) + (xyxy_b[2]-xyxy_b[0]) * (xyxy_b[3]-xyxy_b[1]) - i
 
-def NMS(recognitions, overlapThresh = 0.1):
-    # Return an empty list, if no boxes given
+def nms(recognitions,overlapThresh=0.1):
+    nmsRecognitions = []
+    for i in range(10):
+        pq=[]
 
-    if len(recognitions) == 0:
-        return []
-    
-    """
-    while (pq.size() > 0) {
-        Recognition[] a = new Recognition[pq.size()];
-        Recognition[] detections = pq.toArray(a);
-        Recognition max = detections[0];
-        nmsRecognitions.add(max);
-        pq.clear();
+        for recognition in recognitions:
+            if recognition[4]==i and recognition[5]>min_conf_threshold:
+                pq.append(recognition)
 
-        for (int k = 1; k < detections.length; k++) {
-            Recognition detection = detections[k];
-            if (boxIou(max.getLocation(), detection.getLocation()) < IOU_THRESHOLD) {
-                pq.add(detection);
-            }
-        }
-    }
-    """
-    pq=sorted(recognitions,key=lambda x:x[5],reverse=True)
-    nmsRecognition=[]
+      
+        pq.sort(key=lambda x:x[5],reverse=True)
+        while len(pq)>0:
+            detections=pq.copy()
+            max = detections[0]
+            nmsRecognitions.append(max)
+            pq.clear()
+
+            for j in range(1,len(detections)):
+                if boxIou(max[:4],detections[j][:4])<overlapThresh:
+                    pq.append(detections[j])
+    return nmsRecognitions
+
+def nmsAllClass(recognitions,overlapThresh=0.1):
+    nmsRecognitions = []
+    pq = list(recognitions.copy())
     while len(pq)>0:
         detections=pq.copy()
-        max = list(detections[0])
-        nmsRecognition.append(max)
+        max = detections[0]
+        nmsRecognitions.append(max)
         pq.clear()
 
         for i in range(1,len(detections)):
             if boxIou(max[:4],detections[i][:4])<overlapThresh:
                 pq.append(detections[i])
+    nmsRecognitions.sort(key=lambda x:x[2]-(x[2]-x[1])/2)
+    return nmsRecognitions
 
 
-    return sorted(list(nmsRecognition[:-1]),key=lambda x:x[2]-(x[2]-x[0])/2)
+def classFilter(classdata):
+    classes = [] # create a list
+    for i in range(classdata.shape[0]):         # loop through all predictions
+        classes.append(classdata[i].argmax())   # get the best classification location
+    return classes  # return classes (int)
+
+def YOLOdetect(output_data):  # input = interpreter, output is boxes(xyxy), classes, scores
+    output_data = output_data[0]                # x(1, 25200, 7) to x(25200, 7)
+    boxes = np.squeeze(output_data[..., :4])    # boxes  [25200, 4]
+    scores = np.squeeze( output_data[..., 4:5]) # confidences  [25200, 1]
+    classes = classFilter(output_data[..., 5:]) # get classes
+    # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
+    x, y, w, h = boxes[..., 0], boxes[..., 1], boxes[..., 2], boxes[..., 3] #xywh
+    xyxy = np.c_[x - w / 2, y - h / 2, x + w / 2, y + h / 2]  # xywh to xyxy   [4, 25200]
+
+    return xyxy, classes, scores  # output is boxes(x,y,x,y), classes(int), scores(float) [predictions length]
 
 
 # Define VideoStream class to handle streaming of video from webcam in separate processing thread
@@ -252,46 +270,58 @@ while True:
     interpreter.set_tensor(input_details[0]['index'],input_data)
     interpreter.invoke()
 
-    output_data = interpreter.get_tensor(output_details[0]['index'])  # get tensor  x(1, 25200, 7)
+    output_data = interpreter.get_tensor(output_details[0]['index'])  # get tensor  x(1, 16800, 15)
+
 
     # Retrieve detection results
-    boxes = interpreter.get_tensor(output_details[0]['index'])[0] # Bounding box coordinates of detected objects
-    classes = interpreter.get_tensor(output_details[2]['index'])[0] # Class index of detected objects
-    scores = interpreter.get_tensor(output_details[3]['index'])[0] # Confidence of detected objects
-
+    xyxy, classes, scores = YOLOdetect(output_data) #boxes(x,y,x,y), classes(int), scores(float) [25200]
+    recognitions = np.c_[xyxy,classes,scores]
+    filter_recognitions= recognitions[((recognitions[:,5] > min_conf_threshold) & (recognitions[:,5] <= 1))]
+   
     # nms flag in exporting yolov5 tflite
-    nms_output = NMS(np.c_[boxes,classes,scores])
+    nms_output = nms(filter_recognitions)
+    nms_output = nmsAllClass(nms_output)
 
     # string output of the result
+    detections = []
     reading=""
 
     # Loop over all detections and draw detection box if confidence is above minimum threshold
-    for i in range(len(nms_output)):
+    for recognition in nms_output:
 
-        if ((nms_output[i][5] > min_conf_threshold) and (nms_output[i][5] <= 1.0)):
+        # Get bounding box coordinates and draw box
+        # Interpreter can return coordinates that are outside of image dimensions, need to force them to be within image using max() and min()
 
-            # Get bounding box coordinates and draw box
-            # Interpreter can return coordinates that are outside of image dimensions, need to force them to be within image using max() and min()
+        """original"""
+        xmin = int(max(1,(recognition[0] * imW)))
+        ymin = int(max(1,(recognition[1] * imH)))
+        xmax = int(min(imW,(recognition[2] * imW)))
+        ymax = int(min(imH,(recognition[3] * imH)))
 
-           
-            xmin = int(max(1,(nms_output[i][0] * imW)))
-            ymin = int(max(1,(nms_output[i][1] * imH)))
-            xmax = int(min(imW,(nms_output[i][2] * imW)))
-            ymax = int(min(imH,(nms_output[i][3] * imH)))
-
-            cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), (10, 255, 0), 2)
-
-            # Draw label
-            object_name = labels[int(nms_output[i][4])] # Look up object name from "labels" array using class index
+        """code changes for yolov5"""
+        # xmin = int(max(1,(xyxy[0][i] * imW)))
+        # ymin = int(max(1,(xyxy[1][i] * imH)))
+        # xmax = int(min(imH,(xyxy[2][i] * imW)))
+        # ymax = int(min(imW,(xyxy[3][i] * imH)))
     
-            """original"""
-            label = object_name # Example: 'person: 72%'
-            labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2) # Get font size
-            label_ymin = max(ymin, labelSize[1] + 10) # Make sure not to draw label too close to top of window
-            cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), (255, 255, 255), cv2.FILLED) # Draw white box to put label text in
-            cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2) # Draw label text
 
-            reading=reading+object_name
+        cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), (10, 255, 0), 2)
+
+        # Draw label
+        object_name = labels[int(recognition[4])] # Look up object name from "labels" array using class index
+        """"remove draw confidence"""
+        # label = '%s: %d%%' % (object_name, int(scores[i]*100)) # Example: 'person: 72%'
+        
+        """original"""
+        label = object_name # Example: 'person: 72%'
+        labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2) # Get font size
+        label_ymin = max(ymin, labelSize[1] + 10) # Make sure not to draw label too close to top of window
+        
+        cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), (255, 255, 255), cv2.FILLED) # Draw white box to put label text in
+        cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2) # Draw label text
+
+        detections.append([object_name, recognition[5], xmin, ymin, xmax, ymax])
+        reading=reading+object_name
 
     # Draw framerate in corner of frame
     cv2.putText(frame,'FPS: {0:.2f}'.format(frame_rate_calc),(30,50),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,0),2,cv2.LINE_AA)
