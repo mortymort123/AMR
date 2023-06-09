@@ -24,6 +24,67 @@ from threading import Thread
 import importlib.util
 
 
+
+def boxIou(xyxy_a,xyxy_b):
+    intersection = boxIntersection(xyxy_a,xyxy_b)
+    union = boxUnion(xyxy_a,xyxy_b)
+    if union<=0:
+        return 1
+    return intersection/union
+
+def boxIntersection(xyxy_a,xyxy_b):
+    maxLeft = max(xyxy_a[0],xyxy_b[0])
+    maxTop = max(xyxy_a[1],xyxy_b[1])
+    minRight = min(xyxy_a[2],xyxy_b[2])
+    minBottom = min(xyxy_a[3],xyxy_b[3])
+    w = minRight -  maxLeft
+    h= minBottom - maxTop  
+    if w<0 and h<0:
+        return 0
+    return w*h 
+
+def boxUnion(xyxy_a, xyxy_b):
+    i = boxIntersection(xyxy_a,xyxy_b)
+    return (xyxy_a[2]-xyxy_a[0]) * (xyxy_a[3]-xyxy_a[1]) + (xyxy_b[2]-xyxy_b[0]) * (xyxy_b[3]-xyxy_b[1]) - i
+
+def nms(recognitions,overlapThresh=0.1):
+    nmsRecognitions = []
+    for i in range(10):
+        pq=[]
+
+        for recognition in recognitions:
+            if recognition[4]==i and recognition[5]>min_conf_threshold:
+                pq.append(recognition)
+
+      
+        pq.sort(key=lambda x:x[5],reverse=True)
+        while len(pq)>0:
+            detections=pq.copy()
+            max = detections[0]
+            nmsRecognitions.append(max)
+            pq.clear()
+
+            for j in range(1,len(detections)):
+                if boxIou(max[:4],detections[j][:4])<overlapThresh:
+                    pq.append(detections[j])
+    return nmsRecognitions
+
+def nmsAllClass(recognitions,overlapThresh=0.1):
+    nmsRecognitions = []
+    pq = list(recognitions.copy())
+    while len(pq)>0:
+        detections=pq.copy()
+        max = detections[0]
+        nmsRecognitions.append(max)
+        pq.clear()
+
+        for i in range(1,len(detections)):
+            if boxIou(max[:4],detections[i][:4])<overlapThresh:
+                pq.append(detections[i])
+    nmsRecognitions.sort(key=lambda x:x[2]-(x[2]-x[1])/2)
+    return nmsRecognitions
+
+
 def classFilter(classdata):
     classes = [] # create a list
     for i in range(classdata.shape[0]):         # loop through all predictions
@@ -214,37 +275,41 @@ while True:
 
     # Retrieve detection results
     xyxy, classes, scores = YOLOdetect(output_data) #boxes(x,y,x,y), classes(int), scores(float) [25200]
-  
+    recognitions = np.c_[xyxy,classes,scores]
+    filter_recognitions= recognitions[((recognitions[:,5] > min_conf_threshold) & (recognitions[:,5] <= 1))]
+   
     # nms flag in exporting yolov5 tflite
-  
+    nms_output = nms(filter_recognitions)
+    nms_output = nmsAllClass(nms_output)
 
     # string output of the result
     detections = []
     reading=""
 
     # Loop over all detections and draw detection box if confidence is above minimum threshold
-    for i in range(len(scores)):
+    for recognition in nms_output:
 
-        if ((scores[i] > min_conf_threshold) and (scores[i] <= 1.0)):
+        # Get bounding box coordinates and draw box
+        # Interpreter can return coordinates that are outside of image dimensions, need to force them to be within image using max() and min()
 
-            """code changes for yolov5"""
-            xmin = int(max(1,(xyxy[i][0] * imW)))
-            ymin = int(max(1,(xyxy[i][1] * imH)))
-            xmax = int(min(imH,(xyxy[i][2] * imW)))
-            ymax = int(min(imW,(xyxy[i][3] * imH)))
-           
+        xmin = int(max(1,(recognition[0] * imW)))
+        ymin = int(max(1,(recognition[1] * imH)))
+        xmax = int(min(imW,(recognition[2] * imW)))
+        ymax = int(min(imH,(recognition[3] * imH)))
 
-            cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), (10, 255, 0), 2)
+        cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), (10, 255, 0), 2)
 
-            # Draw label
-            object_name = labels[int(classes[i])] # Look up object name from "labels" array using class index
-            label = object_name # Example: 'person: 72%'
-            labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2) # Get font size
-            label_ymin = max(ymin, labelSize[1] + 10) # Make sure not to draw label too close to top of window
-            cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), (255, 255, 255), cv2.FILLED) # Draw white box to put label text in
-            cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2) # Draw label text
+        # Draw label
+        object_name = labels[int(recognition[4])] # Look up object name from "labels" array using class index
+        label = object_name # Example: 'person: 72%'
+        labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2) # Get font size
+        label_ymin = max(ymin, labelSize[1] + 10) # Make sure not to draw label too close to top of window
+        
+        cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), (255, 255, 255), cv2.FILLED) # Draw white box to put label text in
+        cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2) # Draw label text
 
-            detections.append([object_name, scores[i], xmin, ymin, xmax, ymax])
+        detections.append([object_name, recognition[5], xmin, ymin, xmax, ymax])
+        reading=reading+object_name
 
     # Draw framerate in corner of frame
     cv2.putText(frame,'FPS: {0:.2f}'.format(frame_rate_calc),(30,50),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,0),2,cv2.LINE_AA)
